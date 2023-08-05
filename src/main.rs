@@ -4,10 +4,25 @@ use std::{path::PathBuf, fs::remove_file};
 use which::which;
 use std::process::Command;
 use std::env;
+use std::fs::File;
 use std::error::Error;
-use std::fmt;
-use rocket::State;
-use std::sync::{Arc, Mutex, Weak};
+use std::fmt::{self, format};
+use md5::compute as md5;
+use std::sync::Arc;
+use rouille::{Response, Request};
+use serde::{Serialize, Deserialize};
+
+use rust_cast::CastDevice;
+
+use std::time::SystemTime;
+
+fn now_in_usecs() -> u128 {
+    match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(n) => n.as_micros(),
+        Err(_) => panic!("SystemTime before UNIX EPOCH!"),
+    }
+}
+
 
 /****************
  * DEFINE ERROR *
@@ -18,7 +33,7 @@ struct NotifydError(String);
 
 impl fmt::Display for NotifydError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "There is an error: {}", self.0)
+        write!(f, "{}", self.0)
     }
 }
 
@@ -29,16 +44,6 @@ impl NotifydError {
     {
         Box::new(NotifydError(String::from(desc)))
     }
-}
-
-/*****************
- * CLI ARGUMENTS *
- *****************/
-
-#[derive(Parser,Debug)]
-struct Cli {
-    /// The config file to be loaded
-    config_file : String
 }
 
 /**************
@@ -117,14 +122,11 @@ impl Drop for TtsSentence
         let _ = remove_file(&self.path);
     }
 }
-
-
 struct TTS
 {
     enginepath : String,
     lang : String,
-    tmpdir : TempDir,
-    counter : u64
+    tmpdir : TempDir
 }
 
 impl TTS
@@ -159,10 +161,11 @@ impl TTS
         panic!("Cannot find any binary for implementing TTS in PATH");
     }
 
-    fn speak_to_file(self :&mut Self, text : String) -> Result<TtsSentence, Box<dyn std::error::Error>>
+    fn speak_to_file(self :& Self, text : String) -> Result<TtsSentence, Box<dyn std::error::Error>>
     {
-        self.counter += 1;
-        let outfile = self.tmpdir.path().join(format!("{}.wav",self.counter));
+        let to_hash = format!("{}{}", text, now_in_usecs());
+        let digest = md5(to_hash);
+        let outfile = self.tmpdir.path().join(format!("{}.wav", format!("{:x}", digest)));
         let outpath: &str = outfile.to_str().expect("Failed to convert path to str");
 
         let cmd: [&str; 6] = [self.enginepath.as_str(), "-w", outpath, "-l", self.lang.as_str(), text.as_str()];
@@ -173,11 +176,12 @@ impl TTS
 
         if !ret.status.success()
         {
+            let err_desc = format!("{}", String::from_utf8(ret.stderr).unwrap());
             println!("{:?}", cmd);
             println!("~~~ Failed to run TSS engine ~~~");
-            println!("{}", String::from_utf8(ret.stderr).unwrap());
+            println!("{}", err_desc);
             println!("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~");
-            return Err(NotifydError::new("Failed to run tts"));
+            return Err(NotifydError::new(err_desc.as_str()));
         }
 
         Ok(TtsSentence::new(outpath, text.as_str()))
@@ -202,7 +206,6 @@ impl TTS
         }
     }
 
-
     fn new(engine : TTSEngine) -> Result<TTS, Box<dyn std::error::Error>>
     {
         let tmp_dir: TempDir = TempDir::new("notifydtts")?;
@@ -225,8 +228,8 @@ impl TTS
 
         return Ok(TTS { tmpdir: tmp_dir,
                         lang : locale,
-                        enginepath: String::from(enginepath.to_string_lossy()),
-                        counter : 0 })
+                        enginepath: String::from(enginepath.to_string_lossy())
+                     })
     }
 
      fn clear(self) -> Result<(), Box<dyn std::error::Error>>
@@ -237,32 +240,178 @@ impl TTS
 
 }
 
+/**********************************
+ * DEFINE THE NOTIFICATION DAEMON *
+ **********************************/
 
-#[macro_use] extern crate rocket;
-
-#[get("/hello/<name>")]
-fn hello(name: &str, tts: &State<TTS>) -> String {
-    let say = tts.speak_to_file(name.to_string()).expect("Success");
-    say.play();
-    name.to_string()
+struct Notifyd
+{
+    port : u32,
+    action_file : String,
+    tts : TTS,
 }
-#[get("/")]
-fn index() -> &'static str {
-    "Hello, world!"
+#[derive(Serialize)]
+struct ProtoResponse
+{
+    success: bool,
+    reason : String,
+    err : String
 }
 
-#[rocket::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+impl Notifyd
+{
+    fn new( port : u32, action_file : String) ->  Result<Notifyd, Box<dyn std::error::Error>>
+    {
+        Ok(
+            Notifyd{
+                port : port,
+                tts : TTS::new(TTSEngine::AUTO)?,
+                action_file : action_file
+            }
+        )
+    }
+
+    fn _to_error(reason : &str, err : Box<dyn std::error::Error>) -> Response
+    {
+        Response::json(&ProtoResponse{
+            success : false,
+            reason : reason.to_string(),
+            err : err.to_string()
+        }).with_status_code(400)
+    }
+
+    fn _to_success(reason : &str) -> Response
+    {
+        Response::json(&ProtoResponse{
+            success : true,
+            reason : reason.to_string(),
+            err : "".to_string()
+        })
+    }
+
+    fn _handle_tts_request(self : & Self, request : &Request) -> Response
+    {
+        let text;
+        match request.get_param("text")
+        {
+            Some(a) => {
+                text = a;
+            }
+            None =>{
+                return Notifyd::_to_error("Bad arguments",
+                                          NotifydError::new("No text passed to /speak"));
+            }
+        }
+
+        let sentence = self.tts.speak_to_file(text);
+
+        match sentence {
+            Ok(a) => {
+                match a.play()
+                {
+                    Ok(()) => {
+                        let cast = CastDevice::connect("192.168.1.164", 8009);
+
+
+                        cast.unwrap().media.load(destination, session_id, media)
+
+                        Notifyd::_to_success("Done emitting requested text")
+                    },
+                    Err(e) => {
+                        Notifyd::_to_error("Failed playing text", e)
+                    }
+                }
+            },
+            Err(err) => {
+                Notifyd::_to_error("Failed to generate TTS from text", err)
+            }
+        }
+    }
+
+    fn _handle_static_req(self : & Self, request : &Request) -> Response
+    {
+        let raw_url = request.url();
+
+        if !raw_url.starts_with("/static/")
+        {
+            panic!("_handle_static_req to be called only on static requests");
+        }
+
+        let target_path: PathBuf = self.tts.tmpdir.path().join(&raw_url["/static/".len()..]);
+
+        if !target_path.is_file()
+        {
+            return Response::empty_404();
+        }
+
+        match File::open(&target_path){
+            Ok(f) => {
+                Response::from_file("audio/wav", f)
+            }
+            Err(e) => {
+                Notifyd::_to_error(format!("Sending static file {}",
+                                                  target_path.as_path().to_string_lossy()).as_str(),
+                                   Box::new(e))
+            }
+        }
+    }
+
+
+    fn route_request(self : &Self, request : &Request) -> Response
+    {
+        match request.url().as_str()
+        {
+            "/speak" => {
+                self._handle_tts_request(request)
+            }
+            v => {
+                // The case of static files
+                if v.starts_with("/static/")
+                {
+                    return self._handle_static_req(request)
+                }
+
+                return Notifyd::_to_error("No such endpoint",
+                                     NotifydError::new(format!("No endpoint {}", v).as_str()));
+            }
+        }
+
+    }
+
+    fn run(self : Arc<Self>)
+    {
+        let me = Arc::clone(&self);
+        rouille::start_server(format!("0.0.0.0:{}",me.port), move |request| {
+            me.route_request(request)
+        });
+    }
+}
+
+/*****************
+ * CLI ARGUMENTS *
+ *****************/
+
+ #[derive(Parser,Debug)]
+ struct Cli {
+     /// The config file to be loaded
+     #[clap(default_value = "")]
+     config_file : String,
+     /// The port of the webserver
+     #[clap(default_value = "8090")]
+     port : u32
+ }
+
+/*******************
+ * DEFINE THE MAIN *
+ *******************/
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = Cli::parse();
 
-    let tts = TTS::new(TTSEngine::PICO2WAV)?;
+    let server = Notifyd::new(args.port, args.config_file)?;
 
-    let _rocket = rocket::build()
-        .mount("/", routes![hello])
-        .mount("/", routes![index])
-        .launch()
-        .await?;
+    Notifyd::run(Arc::new(server));
 
     Ok(())
 }
