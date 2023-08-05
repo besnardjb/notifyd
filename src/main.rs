@@ -11,6 +11,7 @@ use md5::compute as md5;
 use std::sync::Arc;
 use rouille::{Response, Request};
 use serde::{Serialize, Deserialize};
+use soloud::*;
 
 use rust_cast::CastDevice;
 
@@ -92,7 +93,7 @@ impl TtsSentence
         Ok(())
     }
 
-    fn play(self : &Self) -> Result<(), Box<dyn std::error::Error>>
+    fn _play_external(self: & Self) -> Result<(), Box<dyn std::error::Error>>
     {
         let candidate_players = ["paplay", "mplayer", "play" /* sox */];
 
@@ -111,6 +112,20 @@ impl TtsSentence
         }
 
         Err(NotifydError::new(format!("Could not find any player in {:?} to play {}", candidate_players, self.path).as_str()))
+    }
+
+    fn play(self : &Self, sl : & Soloud) -> Result<(), Box<dyn std::error::Error>>
+    {
+        //self.play_external()
+        let mut wav = audio::Wav::default();
+        wav.load(&std::path::Path::new(&self.path))?;
+
+        sl.play(&wav);
+        while sl.voice_count() > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        Ok(())
+
     }
 }
 
@@ -131,7 +146,7 @@ struct TTS
 
 impl TTS
 {
-    fn _tts_to_bin_name( engine : & TTSEngine) -> &'static str
+    fn tts_to_bin_name( engine : & TTSEngine) -> &'static str
     {
         match engine {
             TTSEngine::PICO2WAV => "pico2wave",
@@ -141,7 +156,7 @@ impl TTS
         }
     }
 
-    fn _look_for_candidate_engine(engine : TTSEngine) -> Result<TTSEngine, Box<dyn std::error::Error>>
+    fn look_for_candidate_engine(engine : TTSEngine) -> Result<TTSEngine, Box<dyn std::error::Error>>
     {
         if engine != TTSEngine::AUTO
         {
@@ -151,7 +166,7 @@ impl TTS
         let engines = vec![TTSEngine::PICO2WAV, TTSEngine::ESPEAK, TTSEngine::ESPEAKNG];
 
         for e in engines{
-            match which(TTS::_tts_to_bin_name(&e))
+            match which(TTS::tts_to_bin_name(&e))
             {
                 Ok(_) => return Ok(e),
                 Err(_) => {break;},
@@ -210,9 +225,9 @@ impl TTS
     {
         let tmp_dir: TempDir = TempDir::new("notifydtts")?;
 
-        let engine_to_use = TTS::_look_for_candidate_engine(engine)?;
+        let engine_to_use = TTS::look_for_candidate_engine(engine)?;
 
-        let engine_binary_name = String::from(TTS::_tts_to_bin_name(&engine_to_use));
+        let engine_binary_name = String::from(TTS::tts_to_bin_name(&engine_to_use));
 
         let enginepath : PathBuf;
 
@@ -232,12 +247,6 @@ impl TTS
                      })
     }
 
-     fn clear(self) -> Result<(), Box<dyn std::error::Error>>
-    {
-        self.tmpdir.close()?;
-        Ok(())
-    }
-
 }
 
 /**********************************
@@ -249,6 +258,7 @@ struct Notifyd
     port : u32,
     action_file : String,
     tts : TTS,
+    sound : Soloud
 }
 #[derive(Serialize)]
 struct ProtoResponse
@@ -262,16 +272,19 @@ impl Notifyd
 {
     fn new( port : u32, action_file : String) ->  Result<Notifyd, Box<dyn std::error::Error>>
     {
+        let sl = Soloud::default()?;
+
         Ok(
             Notifyd{
                 port : port,
                 tts : TTS::new(TTSEngine::AUTO)?,
-                action_file : action_file
+                action_file : action_file,
+                sound: sl
             }
         )
     }
 
-    fn _to_error(reason : &str, err : Box<dyn std::error::Error>) -> Response
+    fn error_response(reason : &str, err : Box<dyn std::error::Error>) -> Response
     {
         Response::json(&ProtoResponse{
             success : false,
@@ -280,7 +293,7 @@ impl Notifyd
         }).with_status_code(400)
     }
 
-    fn _to_success(reason : &str) -> Response
+    fn success_response(reason : &str) -> Response
     {
         Response::json(&ProtoResponse{
             success : true,
@@ -298,7 +311,7 @@ impl Notifyd
                 text = a;
             }
             None =>{
-                return Notifyd::_to_error("Bad arguments",
+                return Notifyd::error_response("Bad arguments",
                                           NotifydError::new("No text passed to /speak"));
             }
         }
@@ -307,23 +320,18 @@ impl Notifyd
 
         match sentence {
             Ok(a) => {
-                match a.play()
+                match a.play(&self.sound)
                 {
                     Ok(()) => {
-                        let cast = CastDevice::connect("192.168.1.164", 8009);
-
-
-                        cast.unwrap().media.load(destination, session_id, media)
-
-                        Notifyd::_to_success("Done emitting requested text")
+                        return Notifyd::success_response("Done emitting requested text");
                     },
                     Err(e) => {
-                        Notifyd::_to_error("Failed playing text", e)
+                        return Notifyd::error_response("Failed playing text", e);
                     }
                 }
             },
             Err(err) => {
-                Notifyd::_to_error("Failed to generate TTS from text", err)
+                Notifyd::error_response("Failed to generate TTS from text", err)
             }
         }
     }
@@ -349,7 +357,7 @@ impl Notifyd
                 Response::from_file("audio/wav", f)
             }
             Err(e) => {
-                Notifyd::_to_error(format!("Sending static file {}",
+                Notifyd::error_response(format!("Sending static file {}",
                                                   target_path.as_path().to_string_lossy()).as_str(),
                                    Box::new(e))
             }
@@ -371,7 +379,7 @@ impl Notifyd
                     return self._handle_static_req(request)
                 }
 
-                return Notifyd::_to_error("No such endpoint",
+                return Notifyd::error_response("No such endpoint",
                                      NotifydError::new(format!("No endpoint {}", v).as_str()));
             }
         }

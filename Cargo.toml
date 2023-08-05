@@ -11,5 +11,6 @@ md5 = "0.7.0"
 rouille = "3.6.2"
 rust_cast = "0.18.1"
 serde = { version = "1.0.181", features = ["derive"] }
+soloud = "1.0.3"
 tempdir = "0.3.7"
 which = "4.4.0"
