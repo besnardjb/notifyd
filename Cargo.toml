@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "3.2.25", features = ["derive"] }
+log = "0.4.19"
 md5 = "0.7.0"
 rouille = "3.6.2"
 rust_cast = "0.18.1"

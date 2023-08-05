@@ -510,6 +510,7 @@ name = "notifyd"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "log",
  "md5",
  "rouille",
  "rust_cast",

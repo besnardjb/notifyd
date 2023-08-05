@@ -12,10 +12,13 @@ use std::sync::Arc;
 use rouille::{Response, Request};
 use serde::{Serialize, Deserialize};
 use soloud::*;
-
 use rust_cast::CastDevice;
-
 use std::time::SystemTime;
+
+
+/*******************
+ * HELPER FOR TIME *
+ *******************/
 
 fn now_in_usecs() -> u128 {
     match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
@@ -133,7 +136,7 @@ impl Drop for TtsSentence
 {
     fn drop(&mut self)
     {
-        println!("Removing data for {} : '{}'", self.path, self.text);
+        //println!("Removing data for {} : '{}'", self.path, self.text);
         let _ = remove_file(&self.path);
     }
 }
@@ -304,19 +307,23 @@ impl Notifyd
 
     fn _handle_tts_request(self : & Self, request : &Request) -> Response
     {
-        let text;
-        match request.get_param("text")
+        #[derive(Deserialize)]
+        struct Json {
+            text: String,
+        }
+
+        let json : Json;
+        match rouille::input::json_input(request)
         {
-            Some(a) => {
-                text = a;
+            Ok(a) => {
+                json = a;
             }
-            None =>{
-                return Notifyd::error_response("Bad arguments",
-                                          NotifydError::new("No text passed to /speak"));
+            Err(e) =>{
+                return Notifyd::error_response("Bad arguments", Box::new(e));
             }
         }
 
-        let sentence = self.tts.speak_to_file(text);
+        let sentence = self.tts.speak_to_file(json.text);
 
         match sentence {
             Ok(a) => {
@@ -367,7 +374,9 @@ impl Notifyd
 
     fn route_request(self : &Self, request : &Request) -> Response
     {
-        match request.url().as_str()
+        let url = request.url();
+        //println!("Request to {}", url);
+        match url.as_str()
         {
             "/speak" => {
                 self._handle_tts_request(request)
@@ -405,8 +414,8 @@ impl Notifyd
      #[clap(default_value = "")]
      config_file : String,
      /// The port of the webserver
-     #[clap(default_value = "8090")]
-     port : u32
+     #[clap(short, long, default_value_t = 8090)]
+     port : u32,
  }
 
 /*******************
@@ -416,6 +425,7 @@ impl Notifyd
 fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = Cli::parse();
+
 
     let server = Notifyd::new(args.port, args.config_file)?;
 
