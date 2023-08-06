@@ -339,7 +339,7 @@ struct Notifyd
     port : u32,
     target_uuid : String,
     tts : TTS,
-    sound : Soloud
+    sound : Option<Soloud>
 }
 #[derive(Serialize)]
 struct ProtoResponse
@@ -353,7 +353,12 @@ impl Notifyd
 {
     fn new( port : u32, target_uuid : String) ->  Result<Notifyd, Box<dyn std::error::Error>>
     {
-        let sl = Soloud::default()?;
+        let mut sl = None;
+
+        if target_uuid != "Use Local Speaker"
+        {
+            sl = Some(Soloud::default().expect("Failed to start soloud"));
+        }
 
         Ok(
             Notifyd{
@@ -387,22 +392,30 @@ impl Notifyd
     {
         let sentence: Result<TtsSentence, Box<dyn Error>> = self.tts.speak_to_file(text);
 
-        match sentence {
-            Ok(a) => {
-                match a.play(&self.sound)
-                {
-                    Ok(()) => {
-                        return Notifyd::success_response("Done emitting requested text");
+        match self.sound {
+            Some(ref e) => {
+                match sentence {
+                    Ok(a) => {
+                        match a.play(&e)
+                        {
+                            Ok(()) => {
+                                return Notifyd::success_response("Done emitting requested text");
+                            },
+                            Err(e) => {
+                                return Notifyd::error_response("Failed playing text", e);
+                            }
+                        }
                     },
-                    Err(e) => {
-                        return Notifyd::error_response("Failed playing text", e);
+                    Err(err) => {
+                        Notifyd::error_response("Failed to generate TTS from text", err)
                     }
                 }
             },
-            Err(err) => {
-                Notifyd::error_response("Failed to generate TTS from text", err)
+            None => {
+                return Notifyd::error_response("Failed to load sound device", NotifydError::new("No sound"));
             }
         }
+
     }
 
     fn handle_tts_request(self : & Self, request : &Request) -> Response
