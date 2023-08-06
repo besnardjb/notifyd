@@ -224,7 +224,7 @@ impl TTS
         }
     }
 
-    fn new(engine : TTSEngine) -> Result<TTS, Box<dyn std::error::Error>>
+    fn new(engine : TTSEngine, lang : Option<String>) -> Result<TTS, Box<dyn std::error::Error>>
     {
         let tmp_dir: TempDir = TempDir::new("notifydtts")?;
 
@@ -240,7 +240,22 @@ impl TTS
             Err(_) => panic!("Cannot find TTS engine {} in PATH", engine_binary_name)
         }
 
-        let locale = TTS::get_locale_from_env();
+        let mut locale;
+
+        match lang
+        {
+            Some (a) => {
+                locale = a;
+            }
+            None => {
+                locale = TTS::get_locale_from_env();
+
+                if locale == "C"
+                {
+                    locale = String::from("us-US");
+                }
+            }
+        }
 
         println!("Using TTS engine {}", engine_binary_name);
 
@@ -351,7 +366,7 @@ struct ProtoResponse
 
 impl Notifyd
 {
-    fn new( port : u32, target_uuid : String) ->  Result<Notifyd, Box<dyn std::error::Error>>
+    fn new( port : u32, target_uuid : String, lang : Option<String>) ->  Result<Notifyd, Box<dyn std::error::Error>>
     {
         let mut sl = None;
 
@@ -363,7 +378,7 @@ impl Notifyd
         Ok(
             Notifyd{
                 port : port,
-                tts : TTS::new(TTSEngine::AUTO)?,
+                tts : TTS::new(TTSEngine::AUTO, lang)?,
                 target_uuid : target_uuid,
                 sound: sl
             }
@@ -616,6 +631,9 @@ impl Notifyd
      /// The port of the webserver
      #[clap(short, long, default_value_t = 8090)]
      port : u32,
+     /// Language to use for TTS
+     #[clap(short, long)]
+     lang : Option<String>,
  }
 
 /*******************
@@ -626,7 +644,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = Cli::parse();
 
-    let server = Notifyd::new(args.port, args.chromecast_uuid)?;
+    let server = Notifyd::new(args.port, args.chromecast_uuid, args.lang)?;
 
     Notifyd::run(Arc::new(server));
 
