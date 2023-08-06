@@ -172,7 +172,7 @@ impl TTS
             match which(TTS::tts_to_bin_name(&e))
             {
                 Ok(_) => return Ok(e),
-                Err(_) => {break;},
+                Err(_) => {},
             }
         }
 
