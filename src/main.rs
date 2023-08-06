@@ -13,7 +13,7 @@ use rouille::{Response, Request};
 use serde::{Serialize, Deserialize};
 use soloud::*;
 use rust_cast::CastDevice;
-use std::time::SystemTime;
+use std::time::{SystemTime, Duration};
 
 
 /*******************
@@ -136,7 +136,7 @@ impl Drop for TtsSentence
 {
     fn drop(&mut self)
     {
-        //println!("Removing data for {} : '{}'", self.path, self.text);
+        println!("Removing data for {} : '{}'", self.path, self.text);
         let _ = remove_file(&self.path);
     }
 }
@@ -252,6 +252,84 @@ impl TTS
 
 }
 
+/********************
+ * WAV FILE CASTING *
+ ********************/
+
+struct Caster
+{
+    target_uid : String,
+    url : String
+}
+
+impl Drop for Caster
+{
+    fn drop(&mut self)
+    {
+        let _ = self.stop();
+    }
+}
+
+
+impl Caster
+{
+
+    fn has_go_chromecast() -> Result<(), Box<dyn std::error::Error>>
+    {
+        match which("go-chromecast")
+        {
+            Ok(_) => Ok(()),
+            Err(_) => Err(NotifydError::new("Cannot locate go-chromecast in path"))
+
+        }
+    }
+
+    fn do_run(self : & Self, args : Vec<&str>)  ->  Result<(), Box<dyn std::error::Error>>
+    {
+        let cmd: [&str; 4] = ["go-chromecast", "-u", self.target_uid.as_str(), self.url.as_str()];
+
+        let ret = Command::new("go-chromecast")
+        .args(&args)
+        .output()?;
+
+        if !ret.status.success()
+        {
+            let err_desc = format!("{}", String::from_utf8(ret.stderr).unwrap());
+            println!("{:?} {:?}", cmd, args);
+            println!("~~~ Failed to run go-chromecast ~~~");
+            println!("{}", err_desc);
+            println!("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~");
+            return Err(NotifydError::new(err_desc.as_str()));
+        }
+
+        Ok(())
+    }
+
+    fn load(self : &Self) ->  Result<(), Box<dyn std::error::Error>>
+    {
+        self.do_run(vec!["load", "-u", self.target_uid.as_str(), self.url.as_str()])?;
+        Ok(())
+    }
+
+    fn stop(self : &Self) ->  Result<(), Box<dyn std::error::Error>>
+    {
+        self.do_run(vec!["stop", "-u", self.target_uid.as_str()])?;
+        Ok(())
+    }
+
+    fn new(uid:String, url : String) ->  Result<Caster, Box<dyn std::error::Error>>
+    {
+        Caster::has_go_chromecast()?;
+        Ok(Caster{
+            target_uid : uid,
+            url : url
+        })
+    }
+
+}
+
+
+
 /**********************************
  * DEFINE THE NOTIFICATION DAEMON *
  **********************************/
@@ -305,7 +383,7 @@ impl Notifyd
         })
     }
 
-    fn _handle_tts_request(self : & Self, request : &Request) -> Response
+    fn handle_tts_request(self : & Self, request : &Request) -> Response
     {
         #[derive(Deserialize)]
         struct Json {
@@ -323,7 +401,7 @@ impl Notifyd
             }
         }
 
-        let sentence = self.tts.speak_to_file(json.text);
+        let sentence: Result<TtsSentence, Box<dyn Error>> = self.tts.speak_to_file(json.text);
 
         match sentence {
             Ok(a) => {
@@ -343,13 +421,13 @@ impl Notifyd
         }
     }
 
-    fn _handle_static_req(self : & Self, request : &Request) -> Response
+    fn handle_static_req(self : & Self, request : &Request) -> Response
     {
         let raw_url = request.url();
 
         if !raw_url.starts_with("/static/")
         {
-            panic!("_handle_static_req to be called only on static requests");
+            panic!("handle_static_req to be called only on static requests");
         }
 
         let target_path: PathBuf = self.tts.tmpdir.path().join(&raw_url["/static/".len()..]);
@@ -371,6 +449,30 @@ impl Notifyd
         }
     }
 
+    fn handle_bcast_req(self : & Self, request : &Request) -> Response
+    {
+        #[derive(Deserialize)]
+        struct Json {
+            text: String,
+            uid : String
+        }
+
+        let json : Json;
+        match rouille::input::json_input(request)
+        {
+            Ok(a) => {
+                json = a;
+            }
+            Err(e) =>{
+                return Notifyd::error_response("Bad arguments", Box::new(e));
+            }
+        }
+
+        panic!("Not done yet");
+
+        Notifyd::success_response("Message broadcasted")
+    }
+
 
     fn route_request(self : &Self, request : &Request) -> Response
     {
@@ -379,13 +481,16 @@ impl Notifyd
         match url.as_str()
         {
             "/speak" => {
-                self._handle_tts_request(request)
-            }
+                self.handle_tts_request(request)
+            },
+            "/cast" => {
+                self.handle_bcast_req(request)
+            },
             v => {
                 // The case of static files
                 if v.starts_with("/static/")
                 {
-                    return self._handle_static_req(request)
+                    return self.handle_static_req(request)
                 }
 
                 return Notifyd::error_response("No such endpoint",
@@ -426,6 +531,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = Cli::parse();
 
+    let cast = Caster::new()?;
 
     let server = Notifyd::new(args.port, args.config_file)?;
 
