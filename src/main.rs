@@ -3,6 +3,7 @@ use tempdir::TempDir;
 use std::{path::PathBuf, fs::remove_file};
 use which::which;
 use std::process::Command;
+use std::path::Path;
 use std::env;
 use std::fs::File;
 use std::error::Error;
@@ -12,9 +13,8 @@ use std::sync::Arc;
 use rouille::{Response, Request};
 use serde::{Serialize, Deserialize};
 use soloud::*;
-use rust_cast::CastDevice;
-use std::time::{SystemTime, Duration};
-
+use gethostname::gethostname;
+use std::time::SystemTime;
 
 /*******************
  * HELPER FOR TIME *
@@ -130,16 +130,16 @@ impl TtsSentence
         Ok(())
 
     }
-}
 
-impl Drop for TtsSentence
-{
-    fn drop(&mut self)
+    fn delete(self : &Self) -> Result<(), Box<dyn std::error::Error>>
     {
         println!("Removing data for {} : '{}'", self.path, self.text);
-        let _ = remove_file(&self.path);
+        remove_file(&self.path)?;
+        Ok(())
     }
 }
+
+
 struct TTS
 {
     enginepath : String,
@@ -259,7 +259,7 @@ impl TTS
 struct Caster
 {
     target_uid : String,
-    url : String
+    url : String,
 }
 
 impl Drop for Caster
@@ -337,7 +337,7 @@ impl Caster
 struct Notifyd
 {
     port : u32,
-    action_file : String,
+    target_uuid : String,
     tts : TTS,
     sound : Soloud
 }
@@ -351,7 +351,7 @@ struct ProtoResponse
 
 impl Notifyd
 {
-    fn new( port : u32, action_file : String) ->  Result<Notifyd, Box<dyn std::error::Error>>
+    fn new( port : u32, target_uuid : String) ->  Result<Notifyd, Box<dyn std::error::Error>>
     {
         let sl = Soloud::default()?;
 
@@ -359,7 +359,7 @@ impl Notifyd
             Notifyd{
                 port : port,
                 tts : TTS::new(TTSEngine::AUTO)?,
-                action_file : action_file,
+                target_uuid : target_uuid,
                 sound: sl
             }
         )
@@ -383,6 +383,28 @@ impl Notifyd
         })
     }
 
+    fn do_tts(self : & Self, text : String)  -> Response
+    {
+        let sentence: Result<TtsSentence, Box<dyn Error>> = self.tts.speak_to_file(text);
+
+        match sentence {
+            Ok(a) => {
+                match a.play(&self.sound)
+                {
+                    Ok(()) => {
+                        return Notifyd::success_response("Done emitting requested text");
+                    },
+                    Err(e) => {
+                        return Notifyd::error_response("Failed playing text", e);
+                    }
+                }
+            },
+            Err(err) => {
+                Notifyd::error_response("Failed to generate TTS from text", err)
+            }
+        }
+    }
+
     fn handle_tts_request(self : & Self, request : &Request) -> Response
     {
         #[derive(Deserialize)]
@@ -401,24 +423,7 @@ impl Notifyd
             }
         }
 
-        let sentence: Result<TtsSentence, Box<dyn Error>> = self.tts.speak_to_file(json.text);
-
-        match sentence {
-            Ok(a) => {
-                match a.play(&self.sound)
-                {
-                    Ok(()) => {
-                        return Notifyd::success_response("Done emitting requested text");
-                    },
-                    Err(e) => {
-                        return Notifyd::error_response("Failed playing text", e);
-                    }
-                }
-            },
-            Err(err) => {
-                Notifyd::error_response("Failed to generate TTS from text", err)
-            }
-        }
+        self.do_tts(json.text)
     }
 
     fn handle_static_req(self : & Self, request : &Request) -> Response
@@ -449,6 +454,55 @@ impl Notifyd
         }
     }
 
+    fn sentence_static_url(self : & Self, sentence : TtsSentence) -> String
+    {
+        use local_ip_address::local_ip;
+        let fpath;
+        match  Path::new(&sentence.path).file_name() {
+            Some(p) => {
+                fpath = String::from(p.to_string_lossy());
+            }
+            None => {
+                fpath = String::from("");
+            }
+        }
+
+        let my_local_ip = local_ip().unwrap();
+        format!("http://{}:{}/static/{}", my_local_ip, self.port, fpath)
+    }
+
+    fn do_bcast(self : & Self, text : String, uid : String) -> Response
+    {
+        let sentence : TtsSentence;
+
+        match self.tts.speak_to_file(text) {
+            Ok(s) => {
+                sentence = s;
+            },
+            Err(e) => {
+                return Notifyd::error_response("Failed to generate TTS", e);
+            }
+        }
+
+        let url = self.sentence_static_url(sentence);
+
+        match Caster::new(uid, url) {
+            Ok(c) => {
+                match c.load() {
+                    Ok(()) => {
+                        return Notifyd::success_response("Content casted");
+                    }
+                    Err(e) => {
+                        return Notifyd::error_response("Failed to cast content", e);
+                    }
+                }
+            },
+            Err(e) => {
+                return Notifyd::error_response("Failed start cast", e);
+            }
+        }
+    }
+
     fn handle_bcast_req(self : & Self, request : &Request) -> Response
     {
         #[derive(Deserialize)]
@@ -468,11 +522,36 @@ impl Notifyd
             }
         }
 
-        panic!("Not done yet");
-
-        Notifyd::success_response("Message broadcasted")
+        self.do_bcast(json.text, json.uid)
     }
 
+    fn handle_notify_req(self : &Self, request : &Request)  -> Response
+    {
+        #[derive(Deserialize)]
+        struct Json {
+            text: String,
+        }
+
+        let json : Json;
+        match rouille::input::json_input(request)
+        {
+            Ok(a) => {
+                json = a;
+            }
+            Err(e) =>{
+                return Notifyd::error_response("Bad arguments", Box::new(e));
+            }
+        }
+
+        if self.target_uuid == "Use Local Speaker"
+        {
+            self.do_tts(json.text)
+        }
+        else
+        {
+            self.do_bcast(json.text, self.target_uuid.to_string())
+        }
+    }
 
     fn route_request(self : &Self, request : &Request) -> Response
     {
@@ -480,12 +559,15 @@ impl Notifyd
         //println!("Request to {}", url);
         match url.as_str()
         {
-            "/speak" => {
+            "/action/speak" => {
                 self.handle_tts_request(request)
             },
-            "/cast" => {
+            "/action/cast" => {
                 self.handle_bcast_req(request)
             },
+            "/notify" => {
+                self.handle_notify_req(request)
+            }
             v => {
                 // The case of static files
                 if v.starts_with("/static/")
@@ -515,9 +597,9 @@ impl Notifyd
 
  #[derive(Parser,Debug)]
  struct Cli {
-     /// The config file to be loaded
-     #[clap(default_value = "")]
-     config_file : String,
+     /// The UID of the chromecast to target
+     #[clap(short, long, default_value = "Use Local Speaker")]
+     chromecast_uuid : String,
      /// The port of the webserver
      #[clap(short, long, default_value_t = 8090)]
      port : u32,
@@ -531,9 +613,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = Cli::parse();
 
-    let cast = Caster::new()?;
-
-    let server = Notifyd::new(args.port, args.config_file)?;
+    let server = Notifyd::new(args.port, args.chromecast_uuid)?;
 
     Notifyd::run(Arc::new(server));
 
