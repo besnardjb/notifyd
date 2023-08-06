@@ -355,7 +355,7 @@ impl Notifyd
     {
         let mut sl = None;
 
-        if target_uuid != "Use Local Speaker"
+        if target_uuid == "Use Local Speaker"
         {
             sl = Some(Soloud::default().expect("Failed to start soloud"));
         }
