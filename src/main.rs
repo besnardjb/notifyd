@@ -15,7 +15,6 @@ use serde::{Serialize, Deserialize};
 use soloud::*;
 use std::time::SystemTime;
 use std::io::Write;
-use chrono::{Utc, Duration};
 
 /*******************
  * HELPER FOR TIME *
@@ -183,28 +182,15 @@ impl TTS
 
     fn clean_older_files(self : & Self) -> Result<(), Box<dyn std::error::Error>>
     {
-        let current_time = Utc::now();
-
-        // Calculate the time threshold (12 hours ago)
-        let threshold = current_time - Duration::hours(12);
-
-        // Read the directory and iterate over its entries
         for entry in read_dir(&self.tmpdir)? {
             let entry = entry?;
 
-            // Check if the entry is a file
             if entry.file_type()?.is_file() {
-                // Get the file's metadata
                 let metadata = entry.metadata()?;
-
-                // Get the file's last modified time
                 let modified_time = metadata.modified()?;
 
-                let modified_time_dt: chrono::DateTime<Utc> = modified_time.into();
-
-                // Compare the modified time with the threshold
-                if modified_time_dt < threshold {
-                    // Delete the file
+                if modified_time <= (std::time::SystemTime::now() - std::time::Duration::from_secs(3600 * 12))
+                {
                     let file_path = entry.path();
                     remove_file(&file_path)?;
                     println!("Deleted: {:?}", file_path);
