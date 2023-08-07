@@ -414,11 +414,14 @@ impl Notifyd
 {
     fn new( port : u32, target_uuid : String, lang : Option<String>) ->  Result<Notifyd, Box<dyn std::error::Error>>
     {
-        let mut sl = None;
+        let sl;
 
-        if target_uuid == "Use Local Speaker"
-        {
-            sl = Some(Soloud::default().expect("Failed to start soloud"));
+        match Soloud::default() {
+            Ok(a) => {sl = Some(a);},
+            Err(e) => {
+                println!("Failed to start audio playback : {}", e);
+                sl = None;
+            }
         }
 
         Ok(
