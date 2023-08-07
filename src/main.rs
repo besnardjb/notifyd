@@ -2,7 +2,7 @@ use clap::Parser;
 use tempdir::TempDir;
 use std::{path::PathBuf, fs::remove_file};
 use which::which;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::path::Path;
 use std::env;
 use std::fs::File;
@@ -15,6 +15,7 @@ use serde::{Serialize, Deserialize};
 use soloud::*;
 use gethostname::gethostname;
 use std::time::SystemTime;
+use std::io::Write;
 
 /*******************
  * HELPER FOR TIME *
@@ -186,15 +187,24 @@ impl TTS
         let outfile = self.tmpdir.path().join(format!("{}.wav", format!("{:x}", digest)));
         let outpath: &str = outfile.to_str().expect("Failed to convert path to str");
 
-        let cmd: [&str; 6] = [self.enginepath.as_str(), "-w", outpath, "-l", self.lang.as_str(), text.as_str()];
+        let cmd: [&str; 5] = [self.enginepath.as_str(), "-w", outpath, "-l", self.lang.as_str()];
 
-        let ret = Command::new(cmd[0])
+        let mut child = Command::new(cmd[0])
         .args(&cmd[1..])
-        .output()?;
+        .stdin(Stdio::piped())
+        .spawn()?;
 
-        if !ret.status.success()
+        let mut stdin = child.stdin.take().expect("Failed to open stdin");
+
+        stdin.write_all(text.as_bytes())?;
+        drop(stdin);
+
+        let output = child.wait_with_output().expect("Failed to read stdout");
+
+
+        if !output.status.success()
         {
-            let err_desc = format!("{}", String::from_utf8(ret.stderr).unwrap());
+            let err_desc = format!("{}", String::from_utf8(output.stderr).unwrap());
             println!("{:?}", cmd);
             println!("~~~ Failed to run TSS engine ~~~");
             println!("{}", err_desc);
