@@ -5,17 +5,17 @@ use which::which;
 use std::process::{Command, Stdio};
 use std::path::Path;
 use std::env;
-use std::fs::File;
+use std::fs::{File, read_dir};
 use std::error::Error;
-use std::fmt::{self, format};
+use std::fmt::{self};
 use md5::compute as md5;
 use std::sync::Arc;
 use rouille::{Response, Request};
 use serde::{Serialize, Deserialize};
 use soloud::*;
-use gethostname::gethostname;
 use std::time::SystemTime;
 use std::io::Write;
+use chrono::{Utc, Duration};
 
 /*******************
  * HELPER FOR TIME *
@@ -180,13 +180,49 @@ impl TTS
         panic!("Cannot find any binary for implementing TTS in PATH");
     }
 
+
+    fn clean_older_files(self : & Self) -> Result<(), Box<dyn std::error::Error>>
+    {
+        let current_time = Utc::now();
+
+        // Calculate the time threshold (12 hours ago)
+        let threshold = current_time - Duration::hours(12);
+
+        // Read the directory and iterate over its entries
+        for entry in read_dir(&self.tmpdir)? {
+            let entry = entry?;
+
+            // Check if the entry is a file
+            if entry.file_type()?.is_file() {
+                // Get the file's metadata
+                let metadata = entry.metadata()?;
+
+                // Get the file's last modified time
+                let modified_time = metadata.modified()?;
+
+                let modified_time_dt: chrono::DateTime<Utc> = modified_time.into();
+
+                // Compare the modified time with the threshold
+                if modified_time_dt < threshold {
+                    // Delete the file
+                    let file_path = entry.path();
+                    remove_file(&file_path)?;
+                    println!("Deleted: {:?}", file_path);
+                }
+            }
+        }
+        Ok(())
+    }
+
+
     fn speak_to_file(self :& Self, text : String) -> Result<TtsSentence, Box<dyn std::error::Error>>
     {
+        let _ = self.clean_older_files();
+
         let to_hash = format!("{}{}", text, now_in_usecs());
         let digest = md5(to_hash);
         let outfile = self.tmpdir.path().join(format!("{}.wav", format!("{:x}", digest)));
         let outpath: &str = outfile.to_str().expect("Failed to convert path to str");
-
         let cmd: [&str; 5] = [self.enginepath.as_str(), "-w", outpath, "-l", self.lang.as_str()];
 
         let mut child = Command::new(cmd[0])
