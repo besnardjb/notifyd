@@ -54,7 +54,7 @@ impl NotifydError {
  * TTS ENGINE *
  **************/
 
-#[derive(Debug,PartialEq,Clone)]
+#[derive(Debug,PartialEq)]
 enum TTSEngine
 {
     PIPERTTS,
@@ -275,8 +275,7 @@ impl TTS
     {
         let tmp_dir: TempDir = TempDir::new("notifydtts")?;
 
-        let engine_to_use = TTS::look_for_candidate_engine(engine.clone())?;
-
+        let engine_to_use = TTS::look_for_candidate_engine(engine)?;
         let engine_binary_name = String::from(TTS::tts_to_bin_name(&engine_to_use));
 
         let enginepath : PathBuf;
@@ -306,7 +305,7 @@ impl TTS
 
         println!("Using TTS engine {}", engine_binary_name);
 
-        return Ok(TTS { engine : engine,
+        return Ok(TTS { engine : engine_to_use,
                         tmpdir: tmp_dir,
                         lang : locale,
                         enginepath: String::from(enginepath.to_string_lossy())
