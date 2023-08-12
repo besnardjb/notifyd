@@ -54,9 +54,10 @@ impl NotifydError {
  * TTS ENGINE *
  **************/
 
-#[derive(Debug,PartialEq)]
+#[derive(Debug,PartialEq,Clone)]
 enum TTSEngine
 {
+    PIPERTTS,
     PICO2WAV,
     ESPEAK,
     ESPEAKNG,
@@ -142,6 +143,7 @@ impl TtsSentence
 
 struct TTS
 {
+    engine : TTSEngine,
     enginepath : String,
     lang : String,
     tmpdir : TempDir
@@ -152,6 +154,8 @@ impl TTS
     fn tts_to_bin_name( engine : & TTSEngine) -> &'static str
     {
         match engine {
+            // This is a script calling piper
+            TTSEngine::PIPERTTS => "pipertts",
             TTSEngine::PICO2WAV => "pico2wave",
             TTSEngine::ESPEAK => "espeak",
             TTSEngine::ESPEAKNG =>  "espeak-ng",
@@ -166,7 +170,7 @@ impl TTS
             return Ok(engine)
         }
 
-        let engines = vec![TTSEngine::PICO2WAV, TTSEngine::ESPEAK, TTSEngine::ESPEAKNG];
+        let engines = vec![TTSEngine::PIPERTTS, TTSEngine::PICO2WAV, TTSEngine::ESPEAK, TTSEngine::ESPEAKNG];
 
         for e in engines{
             match which(TTS::tts_to_bin_name(&e))
@@ -209,7 +213,18 @@ impl TTS
         let digest = md5(to_hash);
         let outfile = self.tmpdir.path().join(format!("{}.wav", format!("{:x}", digest)));
         let outpath: &str = outfile.to_str().expect("Failed to convert path to str");
-        let cmd: [&str; 5] = [self.enginepath.as_str(), "-w", outpath, "-l", self.lang.as_str()];
+
+
+        let cmd;
+
+        match self.engine {
+            TTSEngine::PIPERTTS => {
+                cmd = vec![self.enginepath.as_str(), "-f", outpath];
+            },
+            _ => {
+                cmd = vec![self.enginepath.as_str(), "-w", outpath, "-l", self.lang.as_str()];
+            }
+        }
 
         let mut child = Command::new(cmd[0])
         .args(&cmd[1..])
@@ -260,7 +275,7 @@ impl TTS
     {
         let tmp_dir: TempDir = TempDir::new("notifydtts")?;
 
-        let engine_to_use = TTS::look_for_candidate_engine(engine)?;
+        let engine_to_use = TTS::look_for_candidate_engine(engine.clone())?;
 
         let engine_binary_name = String::from(TTS::tts_to_bin_name(&engine_to_use));
 
@@ -291,7 +306,8 @@ impl TTS
 
         println!("Using TTS engine {}", engine_binary_name);
 
-        return Ok(TTS { tmpdir: tmp_dir,
+        return Ok(TTS { engine : engine,
+                        tmpdir: tmp_dir,
                         lang : locale,
                         enginepath: String::from(enginepath.to_string_lossy())
                      })
